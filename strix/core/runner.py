@@ -16,12 +16,13 @@ from agents import RunConfig
 from agents.sandbox import SandboxRunConfig
 from openai import RateLimitError
 
-from strix.agents.factory import build_strix_agent, make_child_factory
+from strix.agents.factory import build_strix_agent, claude_profile_enabled, make_child_factory
 from strix.agents.prompt import render_scope_prompt, render_system_prompt
 from strix.config import codex, load_settings
 from strix.config.models import (
     StrixProvider,
     configure_sdk_api_route,
+    is_claude_model,
     configure_sdk_model_defaults,
     model_supports_images,
     supports_strict_tool_schemas,
@@ -403,8 +404,19 @@ async def run_strix_scan(
             extra_headers=settings.llm.extra_headers,
             extra_body=settings.llm.extra_body,
         )
+        # lab fork (opt-in): per-agent model mix (opus root + sonnet specialists).
+        # The SDK's get_model lets RunConfig.model (a str) globally override every
+        # agent's own model, so a per-agent model only takes effect when
+        # RunConfig.model is None. When the Claude profile + a Claude
+        # STRIX_SPECIALIST_LLM are set, drop the global override and pin each agent
+        # explicitly: root -> resolved_model (opus), children -> specialist (sonnet,
+        # via make_child_factory). Otherwise keep upstream behavior exactly.
+        _specialist = (getattr(settings.llm, "specialist_model", None) or "").strip() or None
+        _model_mix = bool(
+            _specialist and claude_profile_enabled() and is_claude_model(_specialist)
+        )
         run_config = RunConfig(
-            model=resolved_model,
+            model=None if _model_mix else resolved_model,
             model_provider=StrixProvider(),
             model_settings=model_settings,
             sandbox=SandboxRunConfig(client=bundle["client"], session=bundle["session"]),
@@ -510,6 +522,9 @@ async def run_strix_scan(
             instructions_override=root_instructions,
             supports_images=supports_images,
             finish_tool=root_finish_tool,
+            # With the model mix active, RunConfig.model is None, so pin the root
+            # to the resolved model (opus) explicitly. Off => None = upstream.
+            model=resolved_model if _model_mix else None,
         )
 
         if not is_resume:

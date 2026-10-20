@@ -18,6 +18,7 @@ from pydantic import ValidationError
 
 from strix.agents.prompt import render_system_prompt
 from strix.config import load_settings
+from strix.config.models import is_claude_model, routes_through_litellm
 from strix.config.tool_call_arguments import describe_malformed_arguments
 from strix.tools.agents_graph.tools import (
     agent_finish,
@@ -45,7 +46,8 @@ from strix.tools.notes.tools import (
     update_note,
 )
 from strix.tools.nullish import is_nullish
-from strix.tools.output_store import bound_and_store, bound_text
+from strix.tools.output_condense import condense as _condense_output
+from strix.tools.output_store import bound_and_store, bound_text, store_full
 from strix.tools.proxy.tools import (
     list_requests,
     list_sitemap,
@@ -134,10 +136,66 @@ def _tool_output_limits() -> tuple[int, int]:
     return context.tool_output_max_lines, context.tool_output_max_bytes
 
 
+def claude_profile_enabled() -> bool:
+    """Whether lab-fork Claude optimizations may apply (opt-in; default off).
+
+    Explicit ``STRIX_LAB_PROFILE=claude`` wins; any other explicit value is off.
+    When unset it falls back to auto-detecting a Claude ``STRIX_LLM`` that routes
+    through LiteLLM (the only place prompt caching / these tunings help). This is
+    only a *permission* gate: each tuning additionally requires its own explicit
+    opt-in (e.g. ``STRIX_SPECIALIST_LLM``), so the default behavior is unchanged
+    for every provider including Anthropic.
+    """
+    settings = load_settings()
+    profile = (getattr(settings, "lab_profile", None) or "").strip().lower()
+    if profile == "claude":
+        return True
+    if profile:  # any other explicit value => off
+        return False
+    model = settings.llm.model
+    return bool(model) and is_claude_model(model) and routes_through_litellm(model)
+
+
+def _tool_output_parse_enabled(context: Any) -> bool:
+    """Opt-in gate for the lab-fork output condenser. Default off = upstream.
+
+    Enabled only by an explicit ``STRIX_TOOL_OUTPUT_PARSE=1`` or an explicit
+    ``STRIX_LAB_PROFILE=claude`` — never by profile auto-detection, so a plain
+    anthropic run keeps the upstream raw head/tail behavior unless opted in.
+    """
+    if getattr(context, "tool_output_parse", False):
+        return True
+    profile = (getattr(load_settings(), "lab_profile", None) or "").strip().lower()
+    return profile == "claude"
+
+
 async def _bound_result(result: Any) -> Any:
     if not isinstance(result, str):
         return result
     max_lines, max_bytes = _tool_output_limits()
+    context = load_settings().context
+    # lab fork (opt-in): condense known-verbose output. The full raw output is
+    # always spilled to disk first and pointed at, so condensing never drops
+    # data; unrecognized output fails open to the upstream head/tail path.
+    if _tool_output_parse_enabled(context):
+        try:
+            condensed = _condense_output(
+                result, getattr(context, "tool_output_parse_level", "conservative")
+            )
+        except Exception:
+            logger.debug("tool-output condense failed; failing open", exc_info=True)
+            condensed = None
+        if condensed is not None:
+            path = await store_full(result)
+            if path is not None:
+                note = (
+                    f"[Strix lab: condensed view. Full raw output ({len(result)} chars) "
+                    f"saved to {path}; read it with exec_command for anything omitted.]"
+                )
+                return bound_text(
+                    condensed + "\n\n" + note, max_lines=max_lines, max_bytes=max_bytes
+                )
+            # Full output could not be persisted -> never drop data; fall through.
     return await bound_and_store(result, max_lines=max_lines, max_bytes=max_bytes)
 
 
@@ -681,6 +739,7 @@ def build_strix_agent(
     instructions_override: str | None = None,
     supports_images: bool = True,
     finish_tool: Tool = finish_scan,
+    model: str | None = None,
 ) -> SandboxAgent[Any]:
     """Build a SandboxAgent for either root or child use.
 
@@ -740,7 +799,9 @@ def build_strix_agent(
         instructions=instructions,
         tools=tools,
         tool_use_behavior=_finish_tool_use_behavior,
-        model=None,
+        # ``None`` keeps upstream behavior (the agent uses RunConfig.model = STRIX_LLM).
+        # A non-None value (lab-fork specialist model) overrides it for this agent only.
+        model=model,
         capabilities=[
             Filesystem(
                 configure_tools=_make_filesystem_configurator(
@@ -776,6 +837,21 @@ def make_child_factory(
     captured in a closure so each child inherits scan-level configuration
     without the graph tool knowing about runner internals.
     """
+    # lab fork (opt-in): run spawned specialist/child agents on a cheaper Claude
+    # model (e.g. sonnet) while the root stays on STRIX_LLM (e.g. opus). Applied
+    # only under the Claude profile and only when STRIX_SPECIALIST_LLM names a
+    # Claude model; otherwise None = upstream behavior (children use STRIX_LLM).
+    _specialist = (load_settings().llm.specialist_model or "").strip() or None
+    specialist_model = (
+        _specialist
+        if _specialist and claude_profile_enabled() and is_claude_model(_specialist)
+        else None
+    )
+    if specialist_model:
+        logger.info(
+            "lab fork: specialist agents will use model=%s (root stays on STRIX_LLM)",
+            specialist_model,
+        )
 
     def _factory(*, name: str, skills: list[str]) -> SandboxAgent[Any]:
         return build_strix_agent(
@@ -790,6 +866,7 @@ def make_child_factory(
             strict_tool_schemas=strict_tool_schemas,
             system_prompt_context=system_prompt_context,
             supports_images=supports_images,
+            model=specialist_model,
         )
 
     return _factory

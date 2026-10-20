@@ -1,0 +1,78 @@
+# strix の結果ビューア (strix view) を lab 内で安全に公開するオーバーレイ。
+#
+#   docker compose -f lab/compose.yml -f lab/compose.viewer.yml --profile viewer up -d
+#   # 別 run を見る: RUN=<run 名> を環境に入れてから up（既定は最新 run）
+#
+# 構成:
+#   viewer  … cli イメージで `strix view` を起動。runs を read-only で読むだけ。外向き無し
+#             (pentest-ui は internal)。127.0.0.1:8901 にだけループバック公開する。
+#   uiproxy … nginx。host ネットワークで <UI_BIND_IP>:8900 に待受け、閲覧元 IP を
+#             <UI_ALLOW_CIDR> と <UI_BIND_IP>/32 (hairpin) に限定して viewer へ中継。
+#             bind IP / allow CIDR は lab/viewer/nginx.conf に書く（nginx.conf.example から生成。
+#             実 IP を含む nginx.conf は gitignore 済み＝公開リポジトリには載せない）。
+#
+# 安全策: STRIX_APP_URL=http://127.0.0.1:9 (デッドポート=relay 送信を無効化)、テレメトリ/更新 OFF、
+#   runs は :ro、viewer は internal ネットワークのみ (egress 不可)。viewer の token/cookie 認証はそのまま。
+name: strix-lab
+
+services:
+  viewer:
+    image: strix-lab/cli:local
+    profiles: ["viewer"]
+    # cli イメージの既定 entrypoint は `... main -n`（スキャン用）なので、view 用に上書きする。
+    entrypoint: ["python", "-m", "strix.interface.main", "view", "--host", "0.0.0.0", "--port", "8900", "--no-open"]
+    command: ["${STRIX_VIEW_RUN:-}"]  # 空なら最新 run。特定 run は STRIX_VIEW_RUN=<名前>
+    user: "${LAB_UID:?}:${LAB_GID:?}"
+    read_only: true
+    tmpfs:
+      - /home/strix:mode=0700,uid=${LAB_UID},gid=${LAB_GID}
+      - /tmp
+    environment:
+      HOME: /home/strix
+      STRIX_TELEMETRY: "0"
+      STRIX_NO_UPDATE_CHECK: "1"
+      LITELLM_LOCAL_MODEL_COST_MAP: "True"
+      # relay (メール認証/レポート送信) をデッドポートへ向けて無効化。app.strix.ai には出さない。
+      STRIX_APP_URL: http://127.0.0.1:9
+    volumes:
+      - ./runs:/work:ro
+    working_dir: /work
+    # ポートは publish しない。uiproxy (host net) が下の固定 IP:8900 へ直接中継する。
+    # (internal ネットワークのコンテナは publish が無効化されるため、固定 IP 中継にする)
+    networks:
+      pentest-ui:
+        ipv4_address: 10.188.3.2
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 1g
+    pids_limit: 256
+
+  uiproxy:
+    image: nginx:1.30.5-alpine@sha256:0985e772fb9f729e6fa0980da05fca5d9c468e870eed43071545afa9d2e27d94
+    profiles: ["viewer"]
+    # 実クライアント IP を保持して IP 制限を効かせるため host ネットワーク。
+    network_mode: host
+    user: "101:101"
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - ./viewer/nginx.conf:/etc/nginx/nginx.conf:ro
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      - viewer
+    mem_limit: 64m
+    pids_limit: 64
+
+networks:
+  pentest-ui:
+    name: pentest-ui
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.188.3.0/24

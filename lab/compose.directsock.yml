@@ -1,0 +1,10 @@
+# 暫定の簡易オーバーレイ: strix-cli に生の docker.sock を直マウントする。
+#   docker compose -f lab/compose.yml -f lab/compose.directsock.yml --profile cli run --rm strix-cli ...
+#
+# 注意: docker.sock を持つ＝ホストの root 相当（docs/safe-notes.md §3.3）。
+# create 検査（compose.sockproxy.yml）が使えるようになったらそちらに切り替える。
+name: strix-lab
+services:
+  strix-cli:
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

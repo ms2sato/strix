@@ -1,0 +1,62 @@
+# strix view 用の公開 proxy (ui-proxy) 設定の雛形。
+#
+# このファイルを `lab/viewer/nginx.conf` にコピーし、プレースホルダを自分の環境の値に置き換える。
+#   cp lab/viewer/nginx.conf.example lab/viewer/nginx.conf
+#   # __UI_BIND_IP__   … viewer を公開するホストの LAN IP (このマシンの IP)
+#   # __UI_ALLOW_CIDR__ … 閲覧を許可する端末の CIDR (例: 203.0.113.8/32)
+# 実 IP を含む `lab/viewer/nginx.conf` は gitignore 済み（公開リポジトリに実 IP を載せないため）。
+#
+# 目的: コンテナ内の strix viewer (pentest-ui 10.188.3.2:8900) を、LAN の閲覧元だけに絞って公開する。
+#   ARTEX ui-proxy と同じ考え方:
+#   - bind はホスト LAN IP (__UI_BIND_IP__) 自身。network_mode: host で実クライアント IP を保持する
+#     (docker の published port 経由だと SNAT で $remote_addr が docker gateway になり IP 制限が効かない)。
+#   - 許可は閲覧元 (__UI_ALLOW_CIDR__) と bind アドレス自身 (__UI_BIND_IP__/32, hairpin) のみ。他は 403。
+#   - viewer 自体は token + cookie 認証付き。これは「IP の外枠」で、二重の関門。
+#
+# nginx は非 root (uid 101)。pid / 一時ファイルは /tmp (tmpfs)。外向きには一切出ない (proxy_pass は lab 内のみ)。
+
+worker_processes  1;
+error_log /dev/stderr warn;
+pid /tmp/nginx.pid;
+
+events {
+  worker_connections 256;
+}
+
+http {
+  access_log /dev/stdout;
+  server_tokens off;
+  sendfile on;
+
+  client_body_temp_path /tmp/client_temp;
+  proxy_temp_path       /tmp/proxy_temp;
+  fastcgi_temp_path     /tmp/fastcgi_temp;
+  uwsgi_temp_path       /tmp/uwsgi_temp;
+  scgi_temp_path        /tmp/scgi_temp;
+
+  server {
+    # 公開するホストの LAN IP 自身で待受け (host ネットワーク)。
+    listen __UI_BIND_IP__:8900;
+    server_name _;
+
+    # 閲覧元の許可リスト (これ以外は 403)。実クライアント IP で判定。
+    allow __UI_ALLOW_CIDR__;      # 閲覧する端末
+    allow __UI_BIND_IP__/32;      # bind アドレス自身 (hairpin)
+    deny  all;
+
+    client_max_body_size 4m;
+
+    location / {
+      # viewer コンテナの固定 IP (pentest-ui 10.188.3.2:8900)。host net なのでこの IP に直接届く。
+      proxy_pass http://10.188.3.2:8900;
+      proxy_http_version 1.1;
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $remote_addr;
+      # ライブ run のストリーミング更新のためバッファリングを無効化し、長めのタイムアウト
+      proxy_buffering off;
+      proxy_read_timeout 3600s;
+      proxy_send_timeout 3600s;
+    }
+  }
+}

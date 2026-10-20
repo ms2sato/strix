@@ -1,0 +1,3 @@
+# LLM だけを許可する例。初回起動の観測（手順 4）が済んだら allowlist.txt にコピーする。
+# LLM は Anthropic 直（STRIX_LLM=anthropic/claude-opus-4-8）なので、これだけを許可する。
+api.anthropic.com

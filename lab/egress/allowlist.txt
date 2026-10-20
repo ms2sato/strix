@@ -1,0 +1,4 @@
+# egress で CONNECT(443) を許可するドメイン（1 行 1 ドメイン、先頭の . はサブドメインも含む）。
+# 既定では何も許可しない（初回起動の観測用）。LLM を許可するには allowlist.llm.example を参照。
+# （squid は空ファイルを警告扱いにするため、予約 TLD .invalid をダミーで置いている）
+.invalid

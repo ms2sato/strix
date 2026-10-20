@@ -1,0 +1,32 @@
+# 観測・疎通テスト用のオーバーレイ（通常運用では使わない）。
+#   docker compose -f lab/compose.yml -f lab/compose.observe.yml --profile observe up -d nettest-ctl nettest-lab
+#
+# nettest-ctl: pentest-ctl に参加（squid の利用元が strix-cli だけであることの確認に使う）
+# nettest-lab: pentest-lab に参加（サンドボックス相当の位置から外への到達不可を確認する）
+# sniffer は、Strix が作るサンドボックスが動的なので段階1では省略し、squid のログ（docker compose logs egress-proxy）で観測する。
+services:
+  nettest-ctl:
+    build:
+      context: ./observe
+    image: strix-lab/observe:local
+    profiles: ["observe"]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - pentest-ctl
+    mem_limit: 64m
+
+  nettest-lab:
+    image: strix-lab/observe:local
+    build:
+      context: ./observe
+    profiles: ["observe"]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - pentest-lab
+    mem_limit: 64m

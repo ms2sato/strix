@@ -1,0 +1,44 @@
+# 推奨オーバーレイ: strix-cli に生の docker.sock を渡さず、create 検査プロキシ経由にする（§3.3）。
+#   docker compose -f lab/compose.yml -f lab/compose.sockproxy.yml --profile cli run --rm strix-cli ...
+#
+# !!! このプロキシは未検証（docs/safe-notes.md 手順 3 より前）。特に exec の hijack 中継は要レビュー・要実機確認。
+#     動かない/穴が無いことを確認するまでは compose.directsock.yml の暫定経路も残す。
+#
+# sockproxy だけが生の docker.sock を持ち、strix-cli は pentest-sock 内の TCP でそこへつなぐ。
+# bind mount を許すホストパスは、ユーザーが検査対象ソースを渡すときに SOCKPROXY_ALLOWED_BIND_PREFIXES で明示する。
+name: strix-lab
+services:
+  sockproxy:
+    build:
+      context: ./sockproxy
+    image: strix-lab/sockproxy:local
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    user: "${LAB_UID:?}:${DOCKER_GID:?}" # docker.sock を読むため docker グループ
+    environment:
+      SOCKPROXY_ALLOWED_IMAGE: strix-lab/sandbox:local
+      SOCKPROXY_ALLOWED_NETWORK: pentest-lab
+      # 検査対象ソースを渡すときだけ、許可するホストパスの接頭辞をここに（: 区切り）。既定は bind 禁止
+      SOCKPROXY_ALLOWED_BIND_PREFIXES: ${SOCKPROXY_ALLOWED_BIND_PREFIXES:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      pentest-sock: {}
+    mem_limit: 128m
+    pids_limit: 64
+
+  strix-cli:
+    environment:
+      DOCKER_HOST: tcp://sockproxy:2375
+    networks:
+      pentest-sock: {}
+    depends_on:
+      - sockproxy
+
+networks:
+  pentest-sock:
+    name: pentest-sock
+    internal: true

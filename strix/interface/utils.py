@@ -1323,7 +1323,10 @@ def collect_local_sources(targets_info: list[dict[str, Any]]) -> list[dict[str, 
                     "source_path": details["target_path"],
                     "workspace_subdir": workspace_subdir,
                     "protect_metadata": True,
-                    "read_only": bool(details.get("read_only")),
+                    # lab fork: white-box のローカルソースは常に read-only で bind する。
+                    # サンドボックス(root 含む)から検査対象ソースを改変できないようにし、
+                    # Anthropic に送られる範囲を「読み取りのみ」の入力に限定する。
+                    "read_only": True,
                 }
             )
 

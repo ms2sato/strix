@@ -30,6 +30,11 @@ class LlmSettings(BaseSettings):
     model_config = _BASE_CONFIG
 
     model: str | None = Field(default=None, alias="STRIX_LLM")
+    # lab fork (opt-in): model for spawned specialist/child agents. Default None =
+    # upstream behavior (every agent uses ``model`` / STRIX_LLM). Only applied when
+    # the Claude lab profile is active and this names a Claude model (see
+    # ``claude_profile_enabled`` in strix/agents/factory.py); otherwise ignored.
+    specialist_model: str | None = Field(default=None, alias="STRIX_SPECIALIST_LLM")
     api_type: ApiType | None = Field(
         default=None,
         validation_alias=AliasChoices("STRIX_API_TYPE", "STRIX_FORCE_API"),
@@ -145,6 +150,14 @@ class ContextSettings(BaseSettings):
     tool_output_max_bytes: int = Field(
         default=50 * 1024, ge=1024, alias="STRIX_TOOL_OUTPUT_MAX_BYTES"
     )
+    # lab fork (opt-in): condense known-verbose tool output (nuclei/httpx/semgrep/
+    # large HTTP responses) with a conservative, fail-open parser before bounding.
+    # Default False = upstream behavior (raw head/tail only). The full raw output is
+    # always spilled to disk and pointed at, so condensing never loses data.
+    tool_output_parse: bool = Field(default=False, alias="STRIX_TOOL_OUTPUT_PARSE")
+    tool_output_parse_level: str = Field(
+        default="conservative", alias="STRIX_TOOL_OUTPUT_PARSE_LEVEL"
+    )
 
 
 class RuntimeSettings(BaseSettings):
@@ -214,6 +227,12 @@ class ViewerSettings(BaseSettings):
 
 class Settings(BaseSettings):
     model_config = _BASE_CONFIG
+
+    # lab fork (opt-in): explicit Claude-optimization profile. Default unset =
+    # upstream behavior. "claude" turns on lab tunings that are only safe/useful
+    # with Anthropic prompt caching (see claude_profile_enabled in factory.py);
+    # when unset it falls back to auto-detecting an anthropic STRIX_LLM.
+    lab_profile: str | None = Field(default=None, alias="STRIX_LAB_PROFILE")
 
     llm: LlmSettings = Field(default_factory=LlmSettings)
     dedupe: DedupeSettings = Field(default_factory=DedupeSettings)

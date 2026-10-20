@@ -1,0 +1,11 @@
+# サンドボックス内の /app/.venv に入れる Python パッケージ（上流 containers/Dockerfile:243-247 と同じ構成）。
+# 手順 3（承認後）に、固定した PY_IMAGE と同じ Python 版でハッシュ付きの requirements.lock を生成し、レビューに出す:
+#   uv pip compile --generate-hashes --python-version 3.12 lab/sandbox/requirements.in -o lab/sandbox/requirements.lock
+# caido-sdk-client は CLI 側の uv.lock と同じ版にそろえる。
+caido-sdk-client==0.2.0
+requests
+httpx
+beautifulsoup4
+lxml
+pyjwt
+cryptography

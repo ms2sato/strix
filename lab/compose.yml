@@ -1,0 +1,158 @@
+# Strix ローカル検査環境（docs/safe-notes.md 段階1）
+#
+#   docker compose -f lab/compose.yml build
+#   docker compose -f lab/compose.yml up -d                       # egress-proxy だけが常駐する
+#   docker compose -f lab/compose.yml run --rm strix-cli -t http://web/ --scan-mode quick --max-budget 5
+#
+# 構成
+#   pentest-ctl  (internal: true / 10.188.2.0/24)  strix-cli, egress-proxy
+#              ※ サンドボックスと検査対象は参加しない → LLM の経路（squid）に届かない
+#   pentest-lab  (internal: true / 10.188.0.0/24)  strix-cli, strix-sandbox（Strix が作成）, 検査対象（別 compose）
+#              ※ 外への経路なし。CLI は Caido（サンドボックスの IP:48080）にここで直接つなぐ
+#   pentest-edge (通常の bridge / 10.188.1.0/24)    egress-proxy だけ。allowlist のドメインへの CONNECT のみ
+#
+# ネットワーク名は Strix が STRIX_DOCKER_SANDBOX_NETWORK で参照するため、name: で固定する。
+#
+# 実行前に必要なもの（lab/README.md「準備」）
+#   - lab/.env           : LAB_UID / LAB_GID / DOCKER_GID（コミットしない）
+#   - LLM_API_KEY を環境に入れる: export LLM_API_KEY=$(cat ~/.config/strix-lab/anthropic-key)（lab/README.md）
+#   - サンドボックスイメージ strix-lab/sandbox:local のビルド（下の sandbox-image サービス）
+name: strix-lab
+
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
+services:
+  egress-proxy:
+    # 許可リスト方式の forward proxy（squid）。pentest-ctl から外へ出る唯一の経路。
+    # 既定の allowlist.txt は何も許可しない（初回起動の観測用）。
+    build:
+      context: ./egress
+    image: strix-lab/egress-proxy:local
+    <<: *hardening
+    user: "13:13" # debian の proxy ユーザー
+    read_only: true
+    volumes:
+      - ./egress/squid.conf:/etc/squid/squid.conf:ro
+      - ./egress/allowlist.txt:/etc/squid/allowlist.txt:ro
+    tmpfs:
+      - /tmp
+      - /var/spool/squid
+      - /var/log/squid
+      - /run
+    networks:
+      pentest-ctl:
+        ipv4_address: 10.188.2.10
+      pentest-edge: {}
+    mem_limit: 256m
+    pids_limit: 128
+    restart: unless-stopped
+
+  strix-cli:
+    # Strix 本体（コントローラー）。本 fork のソース + uv.lock から lab/cli/Dockerfile でビルドする。
+    # `docker compose run --rm strix-cli <strix の引数>` で 1 スキャンずつ実行する（常駐しない）。
+    build:
+      context: ..
+      dockerfile: lab/cli/Dockerfile
+    image: strix-lab/cli:local
+    profiles: ["cli"]
+    <<: *hardening
+    # 結果ディレクトリ（./runs）をホストの利用者が読めるよう、ホストの uid/gid で動かす
+    user: "${LAB_UID:?lab/.env に LAB_UID を設定}:${LAB_GID:?lab/.env に LAB_GID を設定}"
+    # Docker ソケットを使うためにホストの docker グループを付与する。
+    # 注意: ソケットを持つ＝ホストの root 相当（docs/safe-notes.md §3.3）
+    group_add:
+      - "${DOCKER_GID:?lab/.env に DOCKER_GID を設定}"
+    read_only: true
+    tmpfs:
+      # HOME は使い捨て。Strix が書く ~/.strix/cli-config.json（LLM キーを含む）はスキャン終了で消える
+      - /home/strix:mode=0700,uid=${LAB_UID},gid=${LAB_GID}
+      - /tmp
+    environment:
+      HOME: /home/strix
+      # 外部送信の無効化（ネットワークでも塞ぐが二重化する。docs/audit-notes.md §3.1）
+      STRIX_TELEMETRY: "0"
+      STRIX_NO_UPDATE_CHECK: "1"
+      LITELLM_LOCAL_MODEL_COST_MAP: "True"
+      STRIX_APP_URL: http://127.0.0.1:9
+      # 隔離
+      STRIX_DOCKER_SANDBOX_NETWORK: pentest-lab
+      STRIX_IMAGE: strix-lab/sandbox:local
+      STRIX_SANDBOX_MEM_LIMIT: ${STRIX_SANDBOX_MEM_LIMIT:-4g}
+      STRIX_SANDBOX_CPUS: ${STRIX_SANDBOX_CPUS:-2}
+      STRIX_SANDBOX_PIDS_LIMIT: ${STRIX_SANDBOX_PIDS_LIMIT:-1024}
+      # LLM の経路。Caido（pentest-lab 上のサンドボックス）はプロキシに流さない
+      HTTPS_PROXY: http://10.188.2.10:3128
+      HTTP_PROXY: http://10.188.2.10:3128
+      https_proxy: http://10.188.2.10:3128
+      http_proxy: http://10.188.2.10:3128
+      NO_PROXY: localhost,127.0.0.1,sockproxy,10.188.0.0/24
+      no_proxy: localhost,127.0.0.1,sockproxy,10.188.0.0/24
+      # LLM は Anthropic 直（claude-opus-4-8）。allowlist は api.anthropic.com だけ
+      STRIX_LLM: anthropic/claude-opus-4-8
+      # 価格表に claude-opus-4-8 が無いと --max-budget が効かないため、同梱の価格表を使う（docs/safe-notes.md §4）
+      # キー実体はチャットに出さない。スキャン実行前に `export LLM_API_KEY=$(cat ~/.config/strix-lab/anthropic-key)`。
+      # 空でも compose は通る（ビルド・観測は鍵不要）。鍵が無いまま実スキャンすると Strix 側がエラーにする。
+      LLM_API_KEY: ${LLM_API_KEY:-}
+    # Docker へのアクセスは既定では配線しない（§3.3）。実行時に次のどちらかのオーバーレイを重ねる:
+    #   -f lab/compose.sockproxy.yml  … 推奨。create 検査プロキシ経由（ただし未検証。レビュー要）
+    #   -f lab/compose.directsock.yml … 暫定の簡易。生の docker.sock を直マウント
+    # どちらも重ねないと DOCKER_HOST が無く、スキャンは Docker に接続できない（フェイルクローズ）。
+    volumes:
+      - ./runs:/work
+    working_dir: /work
+    networks:
+      pentest-ctl:
+        ipv4_address: 10.188.2.5 # squid の利用元 ACL と一致させる
+      pentest-lab: {}
+    mem_limit: 2g
+    pids_limit: 512
+
+  sandbox-image:
+    # サンドボックスイメージのビルド専用（起動しない）。Strix がこのイメージからコンテナを作る。
+    #   docker compose -f lab/compose.yml --profile build-only build sandbox-image
+    build:
+      context: ..
+      dockerfile: lab/sandbox/Dockerfile
+    image: strix-lab/sandbox:local
+    profiles: ["build-only"]
+
+  target-web:
+    # スモークテスト用のダミー標的（意図的に脆弱。lab/target-example/app.py）。
+    # 外部イメージを増やさないよう、CLI / sandbox と同じ python:3.12-slim を使い回す（digest は同じ値に pin）。
+    # 標準ライブラリだけで動くので pip の取得は不要。pentest-lab の中だけで動かし、ポートは publish しない。
+    image: python:3.12-slim-bookworm@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258
+    <<: *hardening
+    user: "65534:65534" # nobody
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - ./target-example/app.py:/app/app.py:ro
+    command: ["python", "/app/app.py"]
+    networks:
+      pentest-lab: {}
+    mem_limit: 128m
+    pids_limit: 64
+
+networks:
+  pentest-ctl:
+    name: pentest-ctl
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.188.2.0/24
+  pentest-lab:
+    name: pentest-lab
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.188.0.0/24
+  pentest-edge:
+    name: pentest-edge
+    ipam:
+      config:
+        - subnet: 10.188.1.0/24

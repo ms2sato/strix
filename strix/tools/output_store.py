@@ -44,6 +44,23 @@ def configure_spill_writer(writer: SpillWriter | None) -> None:
         _spill["writer"] = writer
 
 
+async def store_full(text: str) -> str | None:
+    """Spill ``text`` to the sandbox workspace and return its path, or None.
+
+    Used by the lab-fork output condenser so the full raw output is always kept
+    on disk before a condensed view is shown. Returns None when no spill writer
+    is installed or the spill fails, so callers can fail safe (skip condensing).
+    """
+    writer = _spill.get("writer")
+    if writer is None:
+        return None
+    try:
+        return await writer(uuid.uuid4().hex, text)
+    except Exception:
+        logger.exception("store_full spill failed")
+        return None
+
+
 def _byte_len(text: str) -> int:
     return len(text.encode("utf-8"))
 

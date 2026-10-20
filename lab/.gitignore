@@ -1,0 +1,8 @@
+# 実キー・実行時の生成物はコミットしない
+secrets/
+runs/
+observe/out/
+.env
+
+# viewer の実 IP 入り設定はローカル専用（nginx.conf.example から生成）
+viewer/nginx.conf

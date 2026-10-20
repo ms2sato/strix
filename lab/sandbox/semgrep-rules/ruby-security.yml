@@ -1,0 +1,96 @@
+# Curated, offline Ruby/Rails security rules for the lab white-box SAST pass.
+#
+# Why local rules: the lab egress allowlist is api.anthropic.com only, so
+# semgrep's registry (`--config auto` / `p/ruby`, semgrep.dev) is unreachable.
+# These hand-written rules run fully offline (`semgrep --config <this file>`)
+# and are targeted at the authorization / BOLA / injection classes the lab
+# scope cares about. Reproducible (no external fetch, no archive sha drift),
+# public-safe (no secrets / no target internals), and version-controlled here.
+#
+# Not a replacement for the full semgrep-rules corpus — a focused, auditable set.
+# Run offline with: semgrep --config <this file> --metrics=off --disable-version-check
+rules:
+  - id: lab-ruby-eval-user-input
+    languages: [ruby]
+    severity: ERROR
+    message: >
+      Use of eval() can execute attacker-controlled code (RCE). Avoid eval on
+      any value derived from request input.
+    metadata: {cwe: ["CWE-95"], category: security}
+    pattern: 'eval(...)'
+
+  - id: lab-ruby-send-dynamic-method
+    languages: [ruby]
+    severity: WARNING
+    message: >
+      Dynamic send/public_send with a non-literal method name can invoke
+      unintended methods when the name is attacker-controlled.
+    metadata: {cwe: ["CWE-470"], category: security}
+    pattern-either:
+      - pattern: '$OBJ.send($M, ...)'
+      - pattern: '$OBJ.public_send($M, ...)'
+
+  - id: lab-rails-mass-assignment-permit-bang
+    languages: [ruby]
+    severity: WARNING
+    message: >
+      params.permit! allows mass assignment of every parameter, enabling
+      privilege/ownership field tampering (e.g. user_id, role).
+    metadata: {cwe: ["CWE-915"], category: security}
+    pattern-either:
+      - pattern: '$P.permit!'
+      - pattern: 'params.permit!'
+
+  - id: lab-rails-skip-authentication-callback
+    languages: [ruby]
+    severity: WARNING
+    message: >
+      skip_before_action on an authentication/authorization callback removes an
+      access-control gate; verify the exposed actions are safe for anonymous or
+      cross-user access (function-level authorization).
+    metadata: {cwe: ["CWE-862"], category: security}
+    patterns:
+      - pattern: 'skip_before_action $CB, ...'
+      - metavariable-regex:
+          metavariable: $CB
+          regex: '(?i):(authenticate|require_login|require_user|authorize|login_required|check_auth).*'
+
+  - id: lab-rails-ar-find-by-params-no-scope
+    languages: [ruby]
+    severity: WARNING
+    message: >
+      Model.find/find_by with a request parameter and no ownership scope is a
+      classic BOLA/IDOR: any authenticated user can address another user's
+      object by id. Prefer current_user.<assoc>.find(params[:id]).
+    metadata: {cwe: ["CWE-639"], category: security}
+    patterns:
+      - pattern-either:
+          - pattern: '$MODEL.find(params[...])'
+          - pattern: '$MODEL.find_by(id: params[...])'
+          - pattern: '$MODEL.find_by_id(params[...])'
+      - metavariable-regex:
+          metavariable: $MODEL
+          regex: '^[A-Z][A-Za-z0-9_:]*$'
+
+  - id: lab-rails-sql-string-interpolation
+    languages: [ruby]
+    severity: ERROR
+    message: >
+      String interpolation inside a SQL fragment (where/find_by_sql/execute) is
+      SQL injection. Use parameter binding or placeholders.
+    metadata: {cwe: ["CWE-89"], category: security}
+    pattern-either:
+      - pattern: '$Q.where("...#{...}...")'
+      - pattern: '$Q.find_by_sql("...#{...}...")'
+      - pattern: '$C.execute("...#{...}...")'
+
+  - id: lab-ruby-command-injection-interpolation
+    languages: [ruby]
+    severity: ERROR
+    message: >
+      Shell command built with interpolation can be command injection when any
+      part is request-derived. Use array-form exec/system without a shell.
+    metadata: {cwe: ["CWE-78"], category: security}
+    pattern-either:
+      - pattern: 'system("...#{...}...")'
+      - pattern: '`...#{...}...`'

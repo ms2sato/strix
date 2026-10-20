@@ -1,0 +1,6 @@
+# white-box 用 SAST ツール。caido 用 /app/.venv とは別の /opt/sast venv に入れる。
+# ハッシュ付き lock を固定した PY_IMAGE と同じ Python 3.12 で生成する:
+#   uv pip compile --generate-hashes --universal --python-version 3.12 \
+#     lab/sandbox/requirements-sast.in -o lab/sandbox/requirements-sast.lock
+bandit==1.9.4
+semgrep==1.181.0
